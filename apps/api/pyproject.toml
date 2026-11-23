@@ -1,0 +1,22 @@
+[project]
+name = "proviso-api"
+version = "0.1.0"
+description = "FastAPI service for Proviso"
+readme = "README.md"
+authors = [
+    { name = "Sandeep-Pasumarthi", email = "sivasandeeppasumarthi@gmail.com" }
+]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "proviso-core",
+]
+
+[project.scripts]
+proviso-api = "proviso_api:main"
+
+[build-system]
+requires = ["uv_build>=0.11.25,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+proviso-core = { workspace = true }
