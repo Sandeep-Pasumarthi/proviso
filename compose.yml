@@ -26,6 +26,23 @@ services:
       timeout: 3s
       retries: 10
       start_period: 30s
+  
+  api:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    image: proviso-api:local
+    environment:
+      PROVISO_DATABASE_URL: postgresql+asyncpg://proviso:proviso@postgres:5432/proviso
+      PROVISO_REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8001:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
 volumes:
   pgdata:

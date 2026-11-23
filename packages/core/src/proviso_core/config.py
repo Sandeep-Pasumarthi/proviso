@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     )
 
     env: str = "local"
-    # Defaults match compose.yaml; real values come from Secrets Manager in AWS.
+    # Defaults match compose.yml; real values come from Secrets Manager in AWS.
     database_url: str = "postgresql+asyncpg://proviso:proviso@localhost:5432/proviso"
     redis_url: str = "redis://localhost:6379/0"
     cors_origins: list[str] = ["http://localhost:5173"]
