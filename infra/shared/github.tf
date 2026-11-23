@@ -9,7 +9,6 @@ resource "aws_iam_openid_connect_provider" "github" {
   client_id_list = ["sts.amazonaws.com"]
 }
 
-# Who may assume the role: only workflows on main in this repository.
 data "aws_iam_policy_document" "github_assume" {
   statement {
     actions = ["sts:AssumeRoleWithWebIdentity"]
@@ -28,7 +27,7 @@ data "aws_iam_policy_document" "github_assume" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:ref:refs/heads/main"]
+      values   = ["repo:${var.github_oidc_repo}:ref:refs/heads/main"]
     }
   }
 }
@@ -39,7 +38,6 @@ resource "aws_iam_role" "github_deploy" {
   max_session_duration = 3600
 }
 
-# What the role may do: exactly what deploy.yml needs, nothing more.
 data "aws_iam_policy_document" "github_deploy" {
   statement {
     sid       = "EcrLogin"
