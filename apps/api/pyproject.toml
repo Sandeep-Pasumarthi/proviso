@@ -8,11 +8,13 @@ authors = [
 ]
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "asyncpg>=0.32.0",
+    "fastapi>=0.165.0",
     "proviso-core",
+    "redis>=8.1.0",
+    "sqlalchemy[asyncio]>=2.1.9",
+    "uvicorn[standard]>=0.54.0",
 ]
-
-[project.scripts]
-proviso-api = "proviso_api:main"
 
 [build-system]
 requires = ["uv_build>=0.11.25,<0.12.0"]
