@@ -1,0 +1,157 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+  ENV_NAME: dev
+  ECR_REPOSITORY: proviso-api
+  ECS_CLUSTER: proviso-dev
+  ECS_SERVICE: api
+  TASK_FAMILY: proviso-dev-api
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  image:
+    name: Build and push API image
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: false
+
+      - name: Work out the image name
+        id: meta
+        run: |
+          account=$(aws sts get-caller-identity --query Account --output text)
+          registry="$account.dkr.ecr.$AWS_REGION.amazonaws.com"
+          echo "registry=$registry" >> "$GITHUB_OUTPUT"
+          echo "image=$registry/$ECR_REPOSITORY:$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push (skipped if this commit's image already exists)
+        env:
+          REGISTRY: ${{ steps.meta.outputs.registry }}
+          IMAGE: ${{ steps.meta.outputs.image }}
+        run: |
+          if aws ecr describe-images --repository-name "$ECR_REPOSITORY" \
+               --image-ids imageTag="$GITHUB_SHA" > /dev/null 2>&1; then
+            echo "Image for $GITHUB_SHA is already in ECR; skipping the build."
+            exit 0
+          fi
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$REGISTRY"
+          docker build -f apps/api/Dockerfile -t "$IMAGE" .
+          docker push "$IMAGE"
+
+  deploy:
+    name: Deploy to dev
+    needs: image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      IMAGE: ${{ needs.image.outputs.image }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: false
+
+      - name: Check the environment is running
+        id: env
+        run: |
+          count=$(aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+            --query "length(services[?status=='ACTIVE'])" --output text 2>/dev/null || echo 0)
+          if [ "$count" = "1" ]; then
+            echo "up=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "up=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::The $ENV_NAME environment is not running. The image is in ECR; after terraform apply, run this workflow manually to deploy it."
+          fi
+
+      # Day 3: run database migrations here as a one-off ECS task, before updating the service.
+
+      - name: Deploy the API
+        if: steps.env.outputs.up == 'true'
+        run: |
+          aws ecs describe-task-definition --task-definition "$TASK_FAMILY" \
+            --query taskDefinition > current.json
+
+          jq --arg image "$IMAGE" '
+            .containerDefinitions[0].image = $image
+            | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                  .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)
+          ' current.json > next.json
+
+          new_td=$(aws ecs register-task-definition --cli-input-json file://next.json \
+            --query taskDefinition.taskDefinitionArn --output text)
+          echo "Registered $new_td"
+
+          aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+            --task-definition "$new_td" > /dev/null
+          echo "Waiting for the service to become stable..."
+          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+
+          result=$(aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+            --query "services[0].deployments[?status=='PRIMARY'] | [0].[taskDefinition, rolloutState]" \
+            --output text)
+          echo "Primary deployment: $result"
+          if [ "$result" != "$(printf '%s\tCOMPLETED' "$new_td")" ]; then
+            echo "::error::The new version did not become the running version. The circuit breaker probably rolled it back; check the ECS service events."
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v6
+        if: steps.env.outputs.up == 'true'
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Build and upload the web app
+        if: steps.env.outputs.up == 'true'
+        working-directory: apps/web
+        run: |
+          npm ci
+          npm run build
+          account=$(aws sts get-caller-identity --query Account --output text)
+          bucket="proviso-$ENV_NAME-web-$account"
+
+          aws s3 sync dist "s3://$bucket" --delete --exclude index.html \
+            --cache-control "public,max-age=31536000,immutable"
+          aws s3 cp dist/index.html "s3://$bucket/index.html" --cache-control "no-cache"
+
+          dist_id=$(aws cloudfront list-distributions \
+            --query "DistributionList.Items[?Comment=='proviso-$ENV_NAME-web'].Id | [0]" --output text)
+          aws cloudfront create-invalidation --distribution-id "$dist_id" --paths "/index.html" > /dev/null
+
+      - name: Smoke test
+        if: steps.env.outputs.up == 'true'
+        run: |
+          domain=$(aws cloudfront list-distributions \
+            --query "DistributionList.Items[?Comment=='proviso-$ENV_NAME-web'].DomainName | [0]" --output text)
+          curl --fail --silent --show-error --retry 5 --retry-delay 10 "https://$domain/api/ready"
+          echo
+          echo "::notice::Deployed and healthy at https://$domain"
